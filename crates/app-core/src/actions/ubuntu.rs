@@ -387,7 +387,7 @@ mod tests {
 
     fn a_kernel_with_landlock(_: &VmPlan) -> crate::jailing::Offer {
         crate::jailing::Offer {
-            support: guesthouse_jail::Support { landlock_abi: 10, seccomp: true },
+            support: guesthouse_jail::Support { landlock_abi: 10, landlock_off: false, seccomp: true },
             ..crate::jailing::Offer::nothing()
         }
     }

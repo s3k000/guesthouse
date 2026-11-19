@@ -22,6 +22,11 @@ pub fn abi() -> u32 {
     sys::abi()
 }
 
+/// Whether the kernel has Landlock built in, but left it out of the security modules it started.
+pub(crate) fn turned_off() -> bool {
+    sys::turned_off()
+}
+
 /// The rights for one path, cut down to what the kernel knows and to what a file can take.
 fn rights_for(grant: Grant, is_folder: bool, handled: u64) -> u64 {
     let rights = rights::of_grant(grant) & handled;

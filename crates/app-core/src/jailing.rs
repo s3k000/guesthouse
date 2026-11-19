@@ -42,7 +42,7 @@ impl Offer {
     /// A PC with nothing to offer: no Landlock, no seccomp, no namespaces.
     pub fn nothing() -> Self {
         Self {
-            support: Support { landlock_abi: 0, seccomp: false },
+            support: Support { landlock_abi: 0, landlock_off: false, seccomp: false },
             namespaces: false,
             qemu_sandbox: false,
             sound_socket: None,
@@ -156,7 +156,7 @@ mod tests {
 
     fn offer(landlock_abi: u32, namespaces: bool) -> Offer {
         Offer {
-            support: Support { landlock_abi, seccomp: true },
+            support: Support { landlock_abi, landlock_off: false, seccomp: true },
             namespaces,
             qemu_sandbox: true,
             sound_socket: None,

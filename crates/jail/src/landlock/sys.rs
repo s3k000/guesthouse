@@ -33,13 +33,22 @@ fn checked(result: libc::c_long) -> io::Result<libc::c_long> {
     if result < 0 { Err(io::Error::last_os_error()) } else { Ok(result) }
 }
 
+fn asked_abi() -> io::Result<libc::c_long> {
+    // SAFETY: with no attributes and this flag, the call only reads nothing and returns a number.
+    checked(unsafe {
+        libc::syscall(libc::SYS_landlock_create_ruleset, ptr::null::<u8>(), 0, CREATE_RULESET_VERSION)
+    })
+}
+
 /// The kernel's Landlock ABI, or 0 if it has none or it's turned off.
 pub fn abi() -> u32 {
-    // SAFETY: with no attributes and this flag, the call only reads nothing and returns a number.
-    let version = unsafe {
-        libc::syscall(libc::SYS_landlock_create_ruleset, ptr::null::<u8>(), 0, CREATE_RULESET_VERSION)
-    };
-    u32::try_from(version).unwrap_or(0)
+    asked_abi().ok().and_then(|version| u32::try_from(version).ok()).unwrap_or(0)
+}
+
+/// Whether the kernel has Landlock built in and didn't turn it on when it started. It answers that
+/// with an error of its own, and a kernel built without Landlock doesn't know the call at all.
+pub fn turned_off() -> bool {
+    asked_abi().is_err_and(|error| error.raw_os_error() == Some(libc::EOPNOTSUPP))
 }
 
 pub fn create_ruleset(fs: u64, net: u64, scoped: u64) -> io::Result<OwnedFd> {
