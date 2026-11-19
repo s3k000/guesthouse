@@ -14,6 +14,8 @@ use crate::usb::sysfs_text;
 use crate::vm_args::on_path;
 use guesthouse_backend_nvidia::profile::BRANCHES;
 use rustix::fs::{Access, access};
+use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -45,6 +47,9 @@ const EXPERIMENTAL_FIX: &str =
     "Nobody has run Windows on this card yet. Others on the same chip work, so it likely does too.";
 const AMD_UNSUPPORTED_FIX: &str = "Windows on AMD needs an RDNA card: the RX 5000 series and newer, or RDNA2 or \
                                    newer graphics in a Ryzen. Older cards like Polaris and Vega aren't handled.";
+/// For a render node whose group can't be told from the node.
+const RENDER_GROUP_FIX: &str =
+    "It usually belongs to the render group: run sudo usermod -aG render $USER, then log in again.";
 /// What setup does on a PC whose only cards are AMD's: nothing, as that driver comes with a machine.
 pub const AMD_NEEDS_NO_SETUP: &str = "This PC's card is AMD's, and it needs no setup. AMD's driver is asked for \
                                       when you make a Windows machine.";
@@ -59,6 +64,9 @@ pub const DRIVER_ROOM_GIB: u64 = 4;
 /// What a new Windows machine gets by default.
 pub const WANTED_RAM_GIB: u64 = 16;
 const QEMU_CHECK_SECONDS: &str = "10";
+/// The system's own list of groups, a line for each as name, password, number and members.
+const GROUPS: &str = "/etc/group";
+const ROOT_GROUP: u32 = 0;
 const MOST_QEMU_WORDS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +362,47 @@ fn check_amd_memory(context: &Context) -> Option<Check> {
     Some(Check::ok(TITLE, format!("{device} can be opened.")))
 }
 
+/// The name of the group a device belongs to, from the list in `groups`. A group that isn't in the
+/// list has no name here, and neither has root's, as nobody should be told to join that one.
+fn group_of(device: &Path, groups: &str) -> Option<String> {
+    let number =
+        fs::metadata(device).ok().map(|device| device.gid()).filter(|number| *number != ROOT_GROUP)?;
+    groups.lines().find_map(|group| {
+        let mut fields = group.split(':');
+        let name = fields.next()?;
+        (fields.nth(1)?.parse() == Ok(number)).then(|| name.to_owned())
+    })
+}
+
+/// The daemon and QEMU open the card's render node as this user, and a machine on the card can't start
+/// without it. A desktop session opens it to whoever is at the seat, so it's a login with no seat, as
+/// over ssh or for a service's own user, that finds it shut on a distro that keeps it to a group. The
+/// same PC can be fine from its desktop, and one shut card of two leaves the other, so this warns and
+/// never fails a PC. Nothing is opened here, so the card isn't touched. A PC with no AMD card isn't asked.
+fn check_amd_render_node(context: &Context) -> Option<Check> {
+    const TITLE: &str = "AMD card's render node";
+    const NEEDED: &str = "No machine on that card starts without it.";
+    let nodes: Vec<PathBuf> = amd_cards(context).into_iter().map(|card| card.render_node).collect();
+    if nodes.is_empty() {
+        return None;
+    }
+    if let Some(missing) = nodes.iter().find(|node| !node.exists()) {
+        let text = format!("{} does not exist.", missing.display());
+        let fix = format!("The card's kernel driver makes it. {NEEDED}");
+        return Some(Check::new(TITLE, CheckState::Warning, text, fix));
+    }
+    let Some(shut) = nodes.iter().find(|node| access(*node, Access::READ_OK | Access::WRITE_OK).is_err())
+    else {
+        let shown: Vec<String> = nodes.iter().map(|node| node.display().to_string()).collect();
+        return Some(Check::ok(TITLE, format!("{} can be opened.", shown.join(" and "))));
+    };
+    let named = group_of(shut, &fs::read_to_string(GROUPS).unwrap_or_default()).map(|group| {
+        format!("It belongs to the {group} group: run sudo usermod -aG {group} $USER, then log in again.")
+    });
+    let fix = format!("{} {NEEDED}", named.unwrap_or_else(|| RENDER_GROUP_FIX.to_owned()));
+    Some(Check::new(TITLE, CheckState::Warning, format!("This user cannot open {}.", shut.display()), fix))
+}
+
 fn check_qemu(context: &Context) -> Check {
     const TITLE: &str = "Patched QEMU";
     let qemu = &context.paths.qemu;
@@ -503,6 +552,7 @@ pub fn check_pc(context: &Context) -> Vec<Check> {
     let mut checks = check_cards(context);
     checks.extend(nvidia_checks(context));
     checks.push(check_kvm(context));
+    checks.extend(check_amd_render_node(context));
     checks.extend(check_amd_memory(context));
     checks.extend([
         check_qemu(context),
@@ -547,6 +597,7 @@ pub fn check_host(context: &Context) -> HostReport {
     deciding.push(check_kvm(context));
     deciding.extend(check_driver_branch(context).filter(|_| !find_cards(context).is_empty()));
     let gpu = gpu_verdict(&deciding).any();
+    deciding.extend(check_amd_render_node(context));
     deciding.extend(check_amd_memory(context));
     deciding.extend([check_ram(context), check_disk(context)]);
     HostReport { checks: deciding, gpu }
@@ -791,6 +842,47 @@ mod tests {
             rustix::process::geteuid().is_root()
                 || (found.state == CheckState::Warning && found.fix.contains("usermod"))
         );
+    }
+
+    #[test]
+    fn a_missing_or_shut_render_node_is_warned_of_and_does_not_take_the_gpu_from_a_pc() {
+        let scratch = Scratch::new();
+        let mut context = scratch_context(&scratch);
+        context.render_nodes = scratch.path("dri");
+        context.kvm = scratch.write("kvm", "");
+        assert_eq!(check_amd_render_node(&context), None, "a PC with no AMD card isn't asked");
+        fake_render_node(&scratch, 128, "0000:03:00.0", "0x1002", 0x7550);
+        fake_graphics(&scratch, "0000:03:00.0", 12);
+        let found = check_amd_render_node(&context).unwrap();
+        assert_eq!(found.state, CheckState::Warning);
+        assert!(found.text.ends_with("renderD128 does not exist."), "{}", found.text);
+        let node = scratch.write("dri/renderD128", "");
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o600)).unwrap();
+        let found = check_amd_render_node(&context).unwrap();
+        assert_eq!(found.state, CheckState::Ok);
+        assert_eq!(found.text, format!("{} can be opened.", node.display()));
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o000)).unwrap();
+        let found = check_amd_render_node(&context).unwrap();
+        assert!(
+            rustix::process::geteuid().is_root()
+                || (found.state == CheckState::Warning
+                    && found.text.contains("renderD128")
+                    && found.fix.contains("usermod"))
+        );
+        let report = check_host(&context);
+        assert!(report.gpu, "a warning leaves the verdict alone");
+        assert!(report.checks.iter().any(|check| check.title == "AMD card's render node"));
+    }
+
+    #[test]
+    fn the_group_to_join_is_the_one_the_device_belongs_to() {
+        let scratch = Scratch::new();
+        let node = scratch.write("renderD128", "");
+        let number = fs::metadata(&node).unwrap().gid();
+        let groups = format!("root:x:0:\nother:x:{}:\nseat:x:{number}:someone\n", u64::from(number) + 1);
+        assert!(number == ROOT_GROUP || group_of(&node, &groups).as_deref() == Some("seat"));
+        assert_eq!(group_of(&node, "root:x:0:\n"), None, "a group the list lacks has no name");
+        assert_eq!(group_of(&scratch.path("nothing"), &groups), None);
     }
 
     #[test]

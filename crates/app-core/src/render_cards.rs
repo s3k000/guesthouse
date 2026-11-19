@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 
 const RENDER_PREFIX: &str = "renderD";
 const DRM_DEVICE_LINK: &str = "device";
-/// Where the render nodes are, which the DRM class names.
-const RENDER_NODES: &str = "/dev/dri";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCard {
@@ -39,15 +37,15 @@ fn named(names: &Path, maker: GpuMaker, number: u32) -> String {
     if product.starts_with(maker.name()) { product } else { format!("{} {product}", maker.name()) }
 }
 
-fn card_of(drm_class: &Path, names: &Path, node: &str, maker: GpuMaker) -> Option<RenderCard> {
-    let device = drm_class.join(node).join(DRM_DEVICE_LINK);
+fn card_of(context: &Context, node: &str, maker: GpuMaker) -> Option<RenderCard> {
+    let device = context.drm_class.join(node).join(DRM_DEVICE_LINK);
     if hex_number(&sysfs_text(&device.join("vendor"))) != Some(u32::from(maker.vendor())) {
         return None;
     }
     let pci = fs::read_link(&device).ok()?.file_name()?.to_string_lossy().into_owned();
     let number = hex_number(&sysfs_text(&device.join("device")))?;
-    let render_node = Path::new(RENDER_NODES).join(node);
-    Some(RenderCard { pci, render_node, name: named(names, maker, number), device: number })
+    let render_node = context.render_nodes.join(node);
+    Some(RenderCard { pci, render_node, name: named(&context.pci_names, maker, number), device: number })
 }
 
 /// The Intel card a recording stands in for, when this process was started with one, for a lab run
@@ -72,8 +70,7 @@ pub const RECORDED: &str = "recorded, no card";
 /// will the one that drives the host's desktop.
 pub fn render_cards(context: &Context, maker: GpuMaker) -> Vec<RenderCard> {
     let nodes = sorted_names(&context.drm_class).into_iter().filter(|name| name.starts_with(RENDER_PREFIX));
-    let mut cards: Vec<RenderCard> =
-        nodes.filter_map(|node| card_of(&context.drm_class, &context.pci_names, &node, maker)).collect();
+    let mut cards: Vec<RenderCard> = nodes.filter_map(|node| card_of(context, &node, maker)).collect();
     if maker == GpuMaker::Intel {
         cards.extend(recorded_intel_card(context));
     }

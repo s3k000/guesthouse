@@ -38,6 +38,8 @@ On an RX 9070 XT, Superposition at 720p Low went from 21,920 to 36,903 with the 
 
 For full speed your user has to be able to open `/dev/udmabuf`. The daemon gives the guest's memory to the card through it. On most distros it belongs to the `kvm` group, so `sudo usermod -aG kvm $USER` and a new login do it. The app's checks and the installer tell you when it can't be opened. Without it Windows still runs, only slower.
 
+Your user also has to be able to open the card's render node in `/dev/dri`, or no machine on the card starts. A desktop session opens it to whoever is logged in at the PC. Over ssh, or for a user that only runs services, some distros keep it to a group, as Debian does with `render`. Then `sudo usermod -aG render $USER` and a new login do it. The app's checks and the installer warn when it can't be opened, and name the node and its group.
+
 A machine made for AMD stays on AMD. It can move to another AMD card while it's off, but an NVIDIA card needs a new machine, and the other way round.
 
 ## Other AMD cards
