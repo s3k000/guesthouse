@@ -41,6 +41,8 @@ const CARD_FIX: &str = "GPU-PV needs an NVIDIA RTX 50, 40, 30 or 20 series or GT
 const NO_CARD_FIX: &str = "GPU-PV needs an NVIDIA RTX 50, 40, 30 or 20 series or GTX 16 series card on the open \
                            kernel modules, an AMD card from the RX 5000 series on, or RDNA2 or newer graphics in a \
                            Ryzen, on amdgpu, or as an experiment, an Intel Arc B580 or Arc 140V on xe.";
+const JAIL_FIX: &str = "Until it can, Windows with GPU-PV won't start and a Linux guest starts without its GPU, \
+                        unless the machine is allowed to start without a jail in its settings.";
 const EXPERIMENTAL_FIX: &str =
     "Nobody has run Windows on this card yet. Others on the same chip work, so it likely does too.";
 const AMD_UNSUPPORTED_FIX: &str = "Windows on AMD needs an RDNA card: the RX 5000 series and newer, or RDNA2 or \
@@ -354,6 +356,24 @@ fn check_amd_memory(context: &Context) -> Option<Check> {
     Some(Check::ok(TITLE, format!("{device} can be opened.")))
 }
 
+/// A GPU machine starts only in its jail, unless its own settings allow it to start without one. That's
+/// each machine's choice, so a kernel that can't jail is a warning here and doesn't take the GPU from
+/// the PC.
+fn judge_jail(support: &guesthouse_jail::Support) -> Check {
+    const TITLE: &str = "Jail";
+    match support.refusal() {
+        Some(reason) => {
+            let text = format!("A GPU machine can't be jailed here: {reason}");
+            Check::new(TITLE, CheckState::Warning, text, JAIL_FIX)
+        }
+        None => Check::ok(TITLE, format!("This kernel has Landlock {} and seccomp.", support.landlock_abi)),
+    }
+}
+
+fn check_jail() -> Check {
+    judge_jail(&guesthouse_jail::Support::probe())
+}
+
 fn check_qemu(context: &Context) -> Check {
     const TITLE: &str = "Patched QEMU";
     let qemu = &context.paths.qemu;
@@ -505,6 +525,7 @@ pub fn check_pc(context: &Context) -> Vec<Check> {
     checks.push(check_kvm(context));
     checks.extend(check_amd_memory(context));
     checks.extend([
+        check_jail(),
         check_qemu(context),
         check_tools(context, &TOOLS),
         check_ubuntu(context, &UBUNTU_TOOLS),
@@ -548,7 +569,7 @@ pub fn check_host(context: &Context) -> HostReport {
     deciding.extend(check_driver_branch(context).filter(|_| !find_cards(context).is_empty()));
     let gpu = gpu_verdict(&deciding).any();
     deciding.extend(check_amd_memory(context));
-    deciding.extend([check_ram(context), check_disk(context)]);
+    deciding.extend([check_jail(), check_ram(context), check_disk(context)]);
     HostReport { checks: deciding, gpu }
 }
 
@@ -803,6 +824,28 @@ mod tests {
         let report = check_host(&context);
         assert_eq!(report.gpu, before);
         assert!(report.checks.iter().any(|check| check.title == "AMD card's guest memory"));
+    }
+
+    #[test]
+    fn a_kernel_that_cannot_jail_is_warned_of_and_keeps_the_gpu() {
+        let off = guesthouse_jail::Support { landlock_abi: 0, landlock_off: true, seccomp: true };
+        let found = judge_jail(&off);
+        assert_eq!((found.state, found.part), (CheckState::Warning, Part::Pc));
+        assert!(found.text.contains("lsm=") && found.fix.contains("without a jail"), "{found:?}");
+        let card = Check::ok("AMD card", "").about(Part::Amd);
+        assert!(gpu_verdict(&[card, found]).amd);
+        let none = guesthouse_jail::Support { landlock_abi: 0, landlock_off: false, seccomp: true };
+        assert_eq!(judge_jail(&none).state, CheckState::Warning);
+        let whole = guesthouse_jail::Support { landlock_abi: 6, landlock_off: false, seccomp: true };
+        let found = judge_jail(&whole);
+        assert!(found.state == CheckState::Ok && found.text.contains("Landlock 6"), "{found:?}");
+    }
+
+    #[test]
+    fn the_installer_hears_of_the_jail_too() {
+        let scratch = Scratch::new();
+        let report = check_host(&scratch_context(&scratch));
+        assert!(report.checks.iter().any(|check| check.title == "Jail"), "{:?}", report.checks);
     }
 
     #[test]
