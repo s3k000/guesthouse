@@ -1,0 +1,53 @@
+# Builds Proxmox VE's QEMU package with the GPU-PV devices, the way packaging/proxmox/build-pve-qemu-kvm.sh
+# does on a PC, from the pve-qemu-kvm that Proxmox's repository has that day. So a patch that stops
+# applying to a new release of Proxmox's fails here, not on someone's host. It publishes nothing, and
+# uploads nothing. QEMU takes a long time, so a PR only runs it when the patch or the script changes.
+name: Proxmox package
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: What to build of pve-qemu.git, such as 11.1.3-4. Empty is the newest in Proxmox's repository.
+        required: false
+        type: string
+  schedule:
+    - cron: "43 3 * * *"
+  pull_request:
+    paths: [qemu/qemu-gpupv.patch, packaging/proxmox/build-pve-qemu-kvm.sh, .github/workflows/proxmox.yml]
+  push:
+    branches: [main]
+    paths: [qemu/qemu-gpupv.patch, packaging/proxmox/build-pve-qemu-kvm.sh, .github/workflows/proxmox.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxmox-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    name: pve-qemu-kvm with GPU-PV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The script ends by looking in the package's QEMU for each device a GPU-PV VM names.
+      - name: Build the package
+        env:
+          REF: ${{ inputs.ref }}
+        run: sh packaging/proxmox/build-pve-qemu-kvm.sh "${REF:-newest}"
+      # The script prints a failed build's last 30 lines, which name a patch that doesn't apply. What a
+      # compiler says can be further up.
+      - name: Show more of the log
+        if: failure()
+        run: |
+          for log in build/proxmox/submodule.log build/proxmox/build.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log"
+            tail -n 300 "$log"
+            echo "::endgroup::"
+          done

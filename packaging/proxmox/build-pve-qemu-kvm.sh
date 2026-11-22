@@ -8,9 +8,10 @@
 #        packaging/proxmox/build-pve-qemu-kvm.sh [--out FOLDER] --patches-only
 #
 # REF is what to build of Proxmox's pve-qemu.git: a version such as 11.1.3-4, which is the commit called
-# "bump version to 11.1.3-4", or a commit or a branch. SUFFIX goes after Proxmox's version, +gpupv1 if
-# it isn't given, so 11.1.3-4 is built as 11.1.3-4+gpupv1. That sorts above Proxmox's 11.1.3-4 and below
-# its next release, which is why the package has to be held.
+# "bump version to 11.1.3-4", or a commit or a branch, or the word newest, which is the version of
+# pve-qemu-kvm that Proxmox's pve-no-subscription repository has now. SUFFIX goes after Proxmox's
+# version, +gpupv1 if it isn't given, so 11.1.3-4 is built as 11.1.3-4+gpupv1. That sorts above Proxmox's
+# 11.1.3-4 and below its next release, which is why the package has to be held.
 #
 # It needs podman or docker and no root on this PC. The build runs in a Debian 13 container, as Proxmox
 # VE 9 is Debian 13, with the build's dependencies from Proxmox's pve-no-subscription repository. The
@@ -26,8 +27,8 @@ KEYRING_SHA256=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
 KEYRING=/usr/share/keyrings/proxmox-archive-keyring.gpg
 IMAGE=${IMAGE:-docker.io/library/debian:trixie}
 SUFFIX=+gpupv1
-# A device the package must have, or a GPU-PV VM won't start on it.
-DEVICE_CHECK=gpupv-render
+# The devices a GPU-PV VM's args: name. The package's QEMU must know each, or the VM won't start on it.
+DEVICES='vmbus-bridge hv-timesync gpupv-global gpupv-vgpu gpupv-render'
 
 REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 OUT=$REPO/build/proxmox
@@ -120,6 +121,23 @@ hand_back() {
     [ -z "${OWNER:-}" ] || chown -R "$OWNER" /build
 }
 
+# Unpacks the package and asks its QEMU for the devices it has, and for the bridge's MMIO window, which
+# Proxmox's own vmbus-bridge hasn't. The libraries it needs are the build's, so they're here. QEMU
+# ends with 0 when asked for a device it doesn't know, so its list is read instead.
+check_devices() {
+    rm -rf /tmp/gpupv-check
+    dpkg-deb -x "$1" /tmp/gpupv-check
+    qemu=/tmp/gpupv-check/usr/bin/qemu-system-x86_64
+    "$qemu" --version | head -n 1 | grep . || die "the package's QEMU doesn't start here."
+    list=$("$qemu" -device help)
+    for device in $DEVICES; do
+        say "$list" | grep -F "name \"$device\"" >/dev/null || die "the package's QEMU has no $device device."
+    done
+    "$qemu" -device vmbus-bridge,help | grep mmio-base >/dev/null ||
+        die "the package's vmbus-bridge has no mmio-base."
+    say "its QEMU has $DEVICES"
+}
+
 inside() {
     ref=$1
     suffix=$2
@@ -137,6 +155,14 @@ inside() {
         die "Proxmox's archive key isn't the one expected."
     say "deb [signed-by=$KEYRING] $PVE_REPOSITORY" >/etc/apt/sources.list.d/pve.list
     apt-get update -qq
+    if [ "$ref" = newest ]; then
+        ref=$(apt-cache policy pve-qemu-kvm | awk '$1 == "Candidate:" { print $2 }')
+        case $ref in
+            [0-9]*.*-*) ;;
+            *) die "Proxmox's repository names no pve-qemu-kvm to build." ;;
+        esac
+        say "the newest pve-qemu-kvm in Proxmox's repository is $ref"
+    fi
 
     # A fresh clone each time, so nothing of an earlier build, its patches or its submodule, is left in it.
     cd /build
@@ -172,8 +198,7 @@ inside() {
     }
     cp "pve-qemu-kvm_${version}_amd64.deb" "pve-qemu-kvm-dbgsym_${version}_amd64.deb" /build/
     cd /build
-    dpkg-deb --fsys-tarfile "pve-qemu-kvm_${version}_amd64.deb" | tar -xO ./usr/bin/qemu-system-x86_64 |
-        grep -a "$DEVICE_CHECK" >/dev/null || die "the package's QEMU has no $DEVICE_CHECK device."
+    check_devices "pve-qemu-kvm_${version}_amd64.deb"
     sha256sum pve-qemu-kvm*.deb >SHA256SUMS
     cat SHA256SUMS
 }
@@ -203,7 +228,7 @@ main() {
     OUT=$(CDPATH='' cd -- "$OUT" && pwd)
     extract_patches "$OUT/patches"
     [ -z "$patches_only" ] || return 0
-    [ $# -eq 1 ] || die "name what to build of pve-qemu.git, such as 11.1.3-4."
+    [ $# -eq 1 ] || die "name what to build of pve-qemu.git, such as 11.1.3-4, or newest."
     find_engine
     "$ENGINE" run --rm --security-opt label=disable -e "OWNER=$OWNER" -e DEBFULLNAME -e DEBEMAIL -e DEB_BUILD_OPTIONS \
         -v "$OUT:/build" -v "$REPO/packaging/proxmox:/script:ro" "$IMAGE" \

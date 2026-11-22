@@ -30,9 +30,13 @@ For a VM without `vmbus-bridge` the six commits change nothing that runs. In `vm
 packaging/proxmox/build-pve-qemu-kvm.sh 11.1.3-4
 ```
 
-The argument is what to build of `git.proxmox.com/git/pve-qemu.git`: a version, which is the commit Proxmox calls "bump version to 11.1.3-4", or a commit or a branch. The package gets Proxmox's version with `+gpupv1` after it, and `--suffix` names another. The script needs podman or docker and no root. It builds in a Debian 13 container, with the build's dependencies from Proxmox's `pve-no-subscription` repository, and checks Proxmox's archive key against the hash in the script. It takes about ten minutes, and leaves the package, its debug symbols and `SHA256SUMS` in `build/proxmox`. On a PC with little RAM, `DEB_BUILD_OPTIONS=parallel=3` before the command limits the build to three jobs. With 7 GiB and eight jobs, the kernel killed a compiler for want of memory.
+The argument is what to build of `git.proxmox.com/git/pve-qemu.git`: a version, which is the commit Proxmox calls "bump version to 11.1.3-4", or a commit or a branch. `newest` builds the version of `pve-qemu-kvm` that Proxmox's `pve-no-subscription` repository has now. The package gets Proxmox's version with `+gpupv1` after it, and `--suffix` names another. The script needs podman or docker and no root. It builds in a Debian 13 container, with the build's dependencies from Proxmox's `pve-no-subscription` repository, and checks Proxmox's archive key against the hash in the script. It takes about ten minutes, and leaves the package, its debug symbols and `SHA256SUMS` in `build/proxmox`. On a PC with little RAM, `DEB_BUILD_OPTIONS=parallel=3` before the command limits the build to three jobs. With 7 GiB and eight jobs, the kernel killed a compiler for want of memory.
 
 It takes the patches from `qemu/qemu-gpupv.patch` in the same checkout: every commit that touches `hw/hyperv/` or `include/hw/hyperv/`. If one of those also touches anything but `hw/i386/acpi-build.c`, it stops, so a new commit is looked at before it goes into the package. `--patches-only` writes the patches to `build/proxmox/patches` and stops there.
+
+At the end it unpacks the package and looks in its QEMU's list for each device the VM's `args:` name, and for the bridge's `mmio-base`, and fails if one is missing.
+
+The workflow `.github/workflows/proxmox.yml` runs the script with `newest` each night, and for a pull request that changes the patch or the script. So a patch that stops applying to a new `pve-qemu-kvm` fails there, and names the patch and the file. It keeps no package. A host's package is built with the script.
 
 `11.1.3-2+gpupv1` and the `11.1.3-4+gpupv1` that runs here were built with the same steps, by hand, before the script. The script has built `11.1.3-4+gpupv1` too, in 11 minutes with three jobs, and its package has the same files, version and dependencies as the one that runs.
 
@@ -47,7 +51,7 @@ It replaced one package, and added and removed nothing. VMs that are running kee
 
 The hold matters. `11.1.3-4+gpupv1` sorts above Proxmox's `11.1.3-4` and below its next release, so without the hold the next update puts Proxmox's package back, and every VM with GPU-PV words in its `args:` stops starting, as QEMU doesn't know the devices. Other VMs don't mind either package.
 
-With the hold, Proxmox's QEMU fixes, security fixes among them, don't reach the host until a build of the new release is installed. `apt list --upgradable` shows when one is waiting. Each new `pve-qemu-kvm` from Proxmox needs a new build before it's installed. A `qemu-server` that asks for a newer `pve-qemu-kvm` would be held back too.
+With the hold, Proxmox's QEMU fixes, security fixes among them, don't reach the host until a build of the new release is installed. `apt list --upgradable` shows when one is waiting. Each new `pve-qemu-kvm` from Proxmox needs a new build before it's installed, and `build-pve-qemu-kvm.sh newest` builds the one the repository has. A `qemu-server` that asks for a newer `pve-qemu-kvm` would be held back too.
 
 To install a build over a held one, `apt install --allow-change-held-packages ./FILE`, then `apt-mark hold pve-qemu-kvm` again. A build that sorts lower also needs `--allow-downgrades`.
 
